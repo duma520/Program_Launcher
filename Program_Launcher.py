@@ -10,7 +10,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QMenu, QTableWidget, QTableWidgetItem, QDialog, QLayout,
                              QCheckBox, QAction, QComboBox, QInputDialog)
 from PyQt5.QtCore import Qt, QSize, QSettings, QTimer, QRect, QPoint, pyqtSignal
-from PyQt5.QtGui import QIcon, QColor, QTextCursor, QTextCharFormat, QFont, QPixmap
+from PyQt5.QtGui import QIcon, QColor, QTextCursor, QTextCharFormat, QFont, QPixmap, QKeySequence
 from PIL import Image, ImageDraw, ImageFont
 import sqlite3
 import win32api
@@ -21,7 +21,7 @@ from typing import Optional, List, Tuple, Dict, Any
 
 class ProjectInfo:
     """项目信息元数据（集中管理所有项目相关信息）"""
-    VERSION = "1.6.0"
+    VERSION = "1.8.0"
     BUILD_DATE = "2025-05-24"
     AUTHOR = "杜玛"
     LICENSE = "MIT"
@@ -596,6 +596,28 @@ class ButtonEditor(QDialog):
     
     def browse_path(self):
         """浏览文件系统选择程序"""
+        # 先检查剪贴板是否有可执行文件
+        clipboard = QApplication.clipboard()
+        if clipboard.mimeData().hasUrls():
+            urls = clipboard.mimeData().urls()
+            if urls and urls[0].isLocalFile():
+                path = urls[0].toLocalFile()
+                if path.lower().endswith(('.exe', '.lnk', '.bat', '.cmd')):
+                    reply = QMessageBox.question(
+                        self, "使用剪贴板路径", 
+                        f"检测到剪贴板中有可执行文件:\n{path}\n\n是否使用此路径?",
+                        QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
+                    if reply == QMessageBox.Yes:
+                        self.path_edit.setText(path)
+                        # 如果没有选择图标且是EXE文件，自动提取图标
+                        if not self.icon_path and path.lower().endswith('.exe'):
+                            icon_path = DynamicIconGenerator.extract_exe_icon(path)
+                            if icon_path:
+                                self.icon_path = icon_path
+                                self.update_icon_btn()
+                        return
+        
+        # 如果没有剪贴板路径或用户选择不使用，则显示文件对话框
         path, _ = QFileDialog.getOpenFileName(
             self, "选择程序", "", "可执行文件 (*.exe *.bat *.cmd);;所有文件 (*.*)")
         if path:
@@ -606,6 +628,7 @@ class ButtonEditor(QDialog):
                 if icon_path:
                     self.icon_path = icon_path
                     self.update_icon_btn()
+
     
     def browse_working_dir(self):
         """浏览工作目录"""
@@ -806,6 +829,90 @@ class MainWindow(QMainWindow):
         
         # 加载窗口设置
         self.load_window_settings()
+
+        # 添加剪贴板监控
+        self.clipboard = QApplication.clipboard()
+        self.clipboard.dataChanged.connect(self.check_clipboard_for_executable)
+        self.last_clipboard_path = None
+        
+        # 添加快捷键
+        self.paste_action = QAction(self)
+        self.paste_action.setShortcut(QKeySequence("Ctrl+V"))
+        self.paste_action.triggered.connect(self.handle_paste_shortcut)
+        self.addAction(self.paste_action)
+
+    def check_clipboard_for_executable(self):
+        """检查剪贴板中是否有可执行文件"""
+        if self.clipboard.mimeData().hasUrls():
+            urls = self.clipboard.mimeData().urls()
+            if urls and urls[0].isLocalFile():
+                path = urls[0].toLocalFile()
+                if path.lower().endswith(('.exe', '.lnk', '.bat', '.cmd')):
+                    self.last_clipboard_path = path
+                    return path
+        elif self.clipboard.mimeData().hasText():
+            text = self.clipboard.text().strip()
+            if text.lower().endswith(('.exe', '.lnk', '.bat', '.cmd')) and os.path.exists(text):
+                self.last_clipboard_path = text
+                return text
+        self.last_clipboard_path = None
+        return None
+
+    def show_add_button_dialog_from_clipboard(self, path, icon_path=""):
+        """从剪贴板路径显示添加按钮对话框"""
+        current_index = self.tab_widget.currentIndex()
+        if current_index == -1:
+            QMessageBox.warning(self, "警告", "请先选择一个分组!")
+            return
+        
+        # 获取当前分组ID
+        db = DatabaseManager()
+        groups = db.get_groups()
+        if not groups:
+            QMessageBox.warning(self, "错误", "没有可用的分组!")
+            return
+        
+        group_id = groups[current_index][0]
+        name = os.path.splitext(os.path.basename(path))[0]
+        
+        # 如果没有找到图标文件且是EXE文件，尝试自动提取图标
+        if not icon_path and path.lower().endswith('.exe'):
+            icon_path = DynamicIconGenerator.extract_exe_icon(path)
+        
+        dialog = ButtonEditor(
+            group_id=group_id,
+            name=name,
+            path=path,
+            icon_path=icon_path,
+            parent=self
+        )
+        dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
+        dialog.exec_()
+
+
+
+    def handle_paste_shortcut(self):
+        """处理Ctrl+V快捷键"""
+        path = self.check_clipboard_for_executable()
+        if path:
+            # 检查程序目录下是否有icon.*文件
+            program_dir = os.path.dirname(path)
+            icon_files = glob.glob(os.path.join(program_dir, "icon.*"))
+            
+            # 支持常见的图标格式
+            supported_extensions = ('.ico', '.png', '.jpg', '.jpeg', '.bmp')
+            icon_path = ""
+            
+            for icon_file in icon_files:
+                if icon_file.lower().endswith(supported_extensions):
+                    icon_path = icon_file
+                    break
+            
+            self.show_add_button_dialog_from_clipboard(path, icon_path)
+        else:
+            QMessageBox.information(self, "提示", "剪贴板中没有找到可执行文件")
+
+
 
     def create_search_box(self):
         """创建搜索框"""
