@@ -1,6 +1,8 @@
 # 程序启动器 - 全方位使用说明书
 
-#软件截图：
+----
+
+# 软件截图：
 
 ![image](https://github.com/user-attachments/assets/b65dcfad-c00f-4432-972b-182d3a614a6a)
 
