@@ -1,5 +1,25 @@
 import os
 import sys
+
+def disable_pyinstaller_timestamp():
+    """禁用PyInstaller的时间戳设置"""
+    try:
+        import PyInstaller.utils.win32.versioninfo
+        PyInstaller.utils.win32.versioninfo.SetVersion = lambda *args, **kwargs: None
+    except ImportError:
+        pass
+def disable_timestamp_check():
+    if getattr(sys, 'frozen', False):
+        try:
+            import PyInstaller.utils.win32.versioninfo
+            PyInstaller.utils.win32.versioninfo.SetVersion = lambda *args, **kwargs: None
+        except ImportError:
+            pass
+# 在程序开始处调用
+disable_pyinstaller_timestamp()
+disable_timestamp_check()
+
+
 import shutil
 import glob
 import datetime
@@ -8,7 +28,7 @@ from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QH
                              QPushButton, QLabel, QLineEdit, QTabWidget, QMessageBox,
                              QFileDialog, QGroupBox, QScrollArea, QSizePolicy, QSpacerItem,
                              QMenu, QTableWidget, QTableWidgetItem, QDialog, QLayout,
-                             QCheckBox, QAction, QComboBox, QInputDialog)
+                             QCheckBox, QAction, QComboBox, QInputDialog, QToolButton)
 from PyQt5.QtCore import Qt, QSize, QSettings, QTimer, QRect, QPoint, pyqtSignal
 from PyQt5.QtGui import QIcon, QColor, QTextCursor, QTextCharFormat, QFont, QPixmap, QKeySequence
 from PIL import Image, ImageDraw, ImageFont
@@ -21,7 +41,7 @@ from typing import Optional, List, Tuple, Dict, Any
 
 class ProjectInfo:
     """项目信息元数据（集中管理所有项目相关信息）"""
-    VERSION = "1.8.0"
+    VERSION = "1.14.0"
     BUILD_DATE = "2025-05-24"
     AUTHOR = "杜玛"
     LICENSE = "MIT"
@@ -191,31 +211,190 @@ class DynamicIconGenerator:
 
     @staticmethod
     def extract_exe_icon(exe_path: str, output_path: str = None) -> Optional[str]:
-        """从exe文件中提取图标"""
+        """从exe文件中提取图标（改进版）"""
         try:
+            import win32ui
+
+            print(f"[DEBUG] 开始提取图标: {exe_path}")
+            
+            if not os.path.exists(exe_path):
+                print(f"[DEBUG] 错误: 文件不存在: {exe_path}")
+                return None
+
             if not output_path:
-                output_path = os.path.join("icons", os.path.basename(exe_path) + ".ico")
+                # 使用绝对路径
+                output_dir = os.path.abspath(os.path.join(os.path.dirname(__file__), "temp_icons"))
+                if not os.path.exists(output_dir):
+                    print(f"[DEBUG] 创建临时图标目录: {output_dir}")
+                    os.makedirs(output_dir)
+                output_path = os.path.abspath(os.path.join(output_dir, f"{os.path.basename(exe_path)}_{hash(exe_path)}.ico"))
+                print(f"[DEBUG] 设置输出路径: {output_path}")
             
-            if not os.path.exists("icons"):
-                os.makedirs("icons")
+            # 方法1: 使用win32gui.ExtractIconEx
+            try:
+                print("[DEBUG] 尝试方法1: win32gui.ExtractIconEx")
+                large, small = win32gui.ExtractIconEx(exe_path, 0)
+                print(f"[DEBUG] 方法1结果 - 大图标数: {len(large) if large else 0}, 小图标数: {len(small) if small else 0}")
+                
+                if large:
+                    print("[DEBUG] 方法1找到大图标，正在保存...")
+                    icon = large[0]
+                    hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
+                    hbmp = win32ui.CreateBitmap()
+                    hbmp.CreateCompatibleBitmap(hdc, 32, 32)
+                    hdc = hdc.CreateCompatibleDC()
+                    hdc.SelectObject(hbmp)
+                    hdc.DrawIcon((0, 0), icon)
+                    hbmp.SaveBitmapFile(hdc, output_path)
+                    win32gui.DestroyIcon(icon)
+                    print(f"[DEBUG] 方法1成功保存图标到: {output_path}")
+                    return output_path
+            except Exception as e:
+                print(f"[DEBUG] 方法1提取图标失败: {str(e)}")
+                import traceback
+                traceback.print_exc()
             
-            # 使用win32api提取图标
-            large, small = win32gui.ExtractIconEx(exe_path, 0)
-            if large:
-                win32gui.DestroyIcon(large[0])
-                # 保存图标
-                icon = win32gui.LoadImage(0, exe_path, win32con.IMAGE_ICON, 0, 0, win32con.LR_LOADFROMFILE | win32con.LR_DEFAULTSIZE)
-                win32gui.SaveImage(icon, output_path, win32con.IMAGE_ICON)
-                return output_path
-        except Exception as e:
-            print(f"提取图标失败: {str(e)}")
+            # 方法2: 使用Pillow提取
+            try:
+                print("[DEBUG] 尝试方法2: Pillow+win32gui.ExtractIcon")
+                from PIL import Image
+                ico_x = win32gui.ExtractIcon(exe_path, 0)
+                print(f"[DEBUG] 方法2结果 - 图标句柄: {bool(ico_x)}")
+                
+                if ico_x:
+                    print("[DEBUG] 方法2找到图标，正在保存...")
+                    hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
+                    hbmp = win32ui.CreateBitmap()
+                    hbmp.CreateCompatibleBitmap(hdc, 32, 32)
+                    hdc = hdc.CreateCompatibleDC()
+                    hdc.SelectObject(hbmp)
+                    hdc.DrawIcon((0, 0), ico_x)
+                    bmpinfo = hbmp.GetInfo()
+                    bmpstr = hbmp.GetBitmapBits(True)
+                    img = Image.frombuffer(
+                        'RGB',
+                        (bmpinfo['bmWidth'], bmpinfo['bmHeight']),
+                        bmpstr, 'raw', 'BGRX', 0, 1
+                    )
+                    img.save(output_path)
+                    win32gui.DestroyIcon(ico_x)
+                    print(f"[DEBUG] 方法2成功保存图标到: {output_path}")
+                    return output_path
+            except Exception as e:
+                print(f"[DEBUG] 方法2提取图标失败: {str(e)}")
+                import traceback
+                traceback.print_exc()
+            
+            # 方法3: 使用Shell API
+            try:
+                print("[DEBUG] 尝试方法3: Shell API (ctypes)")
+                import ctypes
+                from ctypes import wintypes
+                SHGFI_ICON = 0x000000100
+                SHGFI_LARGEICON = 0x000000000
+                SHGFI_SMALLICON = 0x000000001
+                
+                class SHFILEINFO(ctypes.Structure):
+                    _fields_ = [
+                        ('hIcon', ctypes.c_void_p),
+                        ('iIcon', ctypes.c_int),
+                        ('dwAttributes', ctypes.c_uint),
+                        ('szDisplayName', ctypes.c_wchar * 260),
+                        ('szTypeName', ctypes.c_wchar * 80)
+                    ]
+                
+                shell32 = ctypes.windll.shell32
+                info = SHFILEINFO()
+                print(f"[DEBUG] 调用SHGetFileInfoW...")
+                res = shell32.SHGetFileInfoW(
+                    exe_path, 0, ctypes.byref(info), 
+                    ctypes.sizeof(info), 
+                    SHGFI_ICON | SHGFI_LARGEICON
+                )
+                print(f"[DEBUG] SHGetFileInfoW返回: {res}, 图标句柄: {info.hIcon}")
+                
+                if info.hIcon:
+                    print("[DEBUG] 方法3找到图标，正在保存...")
+                    import win32ui
+                    hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
+                    hbmp = win32ui.CreateBitmap()
+                    hbmp.CreateCompatibleBitmap(hdc, 32, 32)
+                    hdc = hdc.CreateCompatibleDC()
+                    hdc.SelectObject(hbmp)
+                    hdc.DrawIcon((0, 0), info.hIcon)
+                    hbmp.SaveBitmapFile(hdc, output_path)
+                    win32gui.DestroyIcon(info.hIcon)
+                    print(f"[DEBUG] 方法3成功保存图标到: {output_path}")
+                    return output_path
+            except Exception as e:
+                print(f"[DEBUG] 方法3提取图标失败: {str(e)}")
+                import traceback
+                traceback.print_exc()
+            
+            # 方法4: 使用系统默认图标
+            try:
+                print("[DEBUG] 尝试方法4: win32com.shell")
+                from win32com.shell import shell, shellcon
+                from win32com.shell.shell import SHGetFileInfo
+                flags = shellcon.SHGFI_ICON | shellcon.SHGFI_LARGEICON
+                print(f"[DEBUG] 调用SHGetFileInfo...")
+                info = SHGetFileInfo(exe_path, 0, flags)
+                print(f"[DEBUG] SHGetFileInfo返回: {info}")
+                
+                if info[0]:
+                    print("[DEBUG] 方法4找到图标，正在保存...")
+                    icon = info[0]
+                    hdc = win32ui.CreateDCFromHandle(win32gui.GetDC(0))
+                    hbmp = win32ui.CreateBitmap()
+                    hbmp.CreateCompatibleBitmap(hdc, 32, 32)
+                    hdc = hdc.CreateCompatibleDC()
+                    hdc.SelectObject(hbmp)
+                    hdc.DrawIcon((0, 0), icon)
+                    hbmp.SaveBitmapFile(hdc, output_path)
+                    win32gui.DestroyIcon(icon)
+                    print(f"[DEBUG] 方法4成功保存图标到: {output_path}")
+                    return output_path
+            except Exception as e:
+                print(f"[DEBUG] 方法4提取图标失败: {str(e)}")
+                import traceback
+                traceback.print_exc()
+            
+            print(f"[DEBUG] 所有方法都无法提取 {exe_path} 的图标")
             return None
+        
+        except Exception as e:
+            print(f"[DEBUG] 提取图标过程中发生异常: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+
+
+
+    @staticmethod
+    def find_icon_in_directory(directory: str) -> Optional[str]:
+        """在指定目录下查找图标文件"""
+        if not os.path.isdir(directory):
+            return None
+        
+        # 查找常见的图标文件
+        icon_patterns = ["icon.*", "*.ico"]
+        for pattern in icon_patterns:
+            files = glob.glob(os.path.join(directory, pattern))
+            if files:
+                # 优先返回.ico文件
+                ico_files = [f for f in files if f.lower().endswith('.ico')]
+                if ico_files:
+                    return ico_files[0]
+                return files[0]  # 返回找到的第一个匹配文件
+        
+        return None
 
 class DatabaseManager:
     def __init__(self):
         self.db_path = "launcher.db"
-        self._init_db()
-        self._init_backup_dir()  # 新增初始化备份目录方法
+        self._init_db() # 初始化数据库
+        self._init_backup_dir() # 初始化备份目录
+        self._init_icon_dir() # 初始化图标目录
 
     def _init_backup_dir(self):
         """初始化备份目录"""
@@ -457,6 +636,38 @@ class DatabaseManager:
                 )
             conn.commit()
 
+
+    def _init_icon_dir(self):
+        """初始化图标目录"""
+        self.icon_dir = os.path.join(os.path.dirname(self.db_path), "icons")
+        if not os.path.exists(self.icon_dir):
+            os.makedirs(self.icon_dir)
+
+    def get_icon_path(self, original_path: str) -> str:
+        """获取图标保存路径"""
+        if not original_path:
+            return ""
+        
+        self._init_icon_dir()
+        filename = os.path.basename(original_path)
+        # 生成唯一文件名避免冲突
+        unique_name = f"{hash(original_path)}_{filename}"
+        return os.path.join(self.icon_dir, unique_name)
+
+    def copy_icon_to_storage(self, icon_path: str) -> str:
+        """将图标复制到持久化存储"""
+        if not icon_path or not os.path.exists(icon_path):
+            return ""
+        
+        target_path = self.get_icon_path(icon_path)
+        try:
+            shutil.copy2(icon_path, target_path)
+            return target_path
+        except Exception as e:
+            print(f"无法复制图标文件: {e}")
+            return icon_path  # 返回原始路径作为回退
+
+
 class HighlightTextEdit(QLineEdit):
     """支持高亮显示搜索关键字的文本框"""
     def __init__(self, parent=None):
@@ -609,12 +820,9 @@ class ButtonEditor(QDialog):
                         QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
                     if reply == QMessageBox.Yes:
                         self.path_edit.setText(path)
-                        # 如果没有选择图标且是EXE文件，自动提取图标
-                        if not self.icon_path and path.lower().endswith('.exe'):
-                            icon_path = DynamicIconGenerator.extract_exe_icon(path)
-                            if icon_path:
-                                self.icon_path = icon_path
-                                self.update_icon_btn()
+                        # 如果没有选择图标，尝试获取图标
+                        if not self.icon_path:
+                            self.set_icon_from_path(path)
                         return
         
         # 如果没有剪贴板路径或用户选择不使用，则显示文件对话框
@@ -622,12 +830,27 @@ class ButtonEditor(QDialog):
             self, "选择程序", "", "可执行文件 (*.exe *.bat *.cmd);;所有文件 (*.*)")
         if path:
             self.path_edit.setText(path)
-            # 如果没有选择图标且是EXE文件，自动提取图标
-            if not self.icon_path and path.lower().endswith('.exe'):
-                icon_path = DynamicIconGenerator.extract_exe_icon(path)
-                if icon_path:
-                    self.icon_path = icon_path
-                    self.update_icon_btn()
+            # 如果没有选择图标，尝试获取图标
+            if not self.icon_path:
+                self.set_icon_from_path(path)
+
+    def set_icon_from_path(self, path):
+        """根据路径自动设置图标"""
+        # 如果是EXE文件，先尝试提取内置图标
+        if path.lower().endswith('.exe'):
+            icon_path = DynamicIconGenerator.extract_exe_icon(path)
+            if icon_path:
+                self.icon_path = icon_path
+                self.update_icon_btn()
+                return
+        
+        # 在程序所在目录查找图标文件
+        program_dir = os.path.dirname(path)
+        icon_path = DynamicIconGenerator.find_icon_in_directory(program_dir)
+        if icon_path:
+            self.icon_path = icon_path
+            self.update_icon_btn()
+
 
     
     def browse_working_dir(self):
@@ -666,12 +889,23 @@ class ButtonEditor(QDialog):
             QMessageBox.warning(self, "警告", "程序路径不能为空!")
             return
         
-        # 如果没有选择图标且路径是EXE文件，尝试自动提取图标
-        icon_path = self.icon_path
-        if not icon_path and path.lower().endswith('.exe'):
-            icon_path = DynamicIconGenerator.extract_exe_icon(path)
-    
         db = DatabaseManager()
+        
+        # 处理图标路径
+        icon_path = self.icon_path
+        if icon_path:  # 如果有图标，确保它被保存到持久化存储
+            icon_path = db.copy_icon_to_storage(icon_path)
+        
+        # 如果没有选择图标且路径是EXE文件，尝试自动提取图标
+        if not icon_path and path.lower().endswith('.exe'):
+            extracted_icon = DynamicIconGenerator.extract_exe_icon(path)
+            if extracted_icon:
+                icon_path = db.copy_icon_to_storage(extracted_icon)
+                try:
+                    os.remove(extracted_icon)  # 删除临时文件
+                except:
+                    pass
+
         if self.button_id is not None:
             # 更新现有按钮
             db.update_button(
@@ -691,6 +925,11 @@ class ButtonEditor(QDialog):
         
         self.parent.load_data()  # 刷新主界面
         self.close()
+
+
+
+
+
 
 class GroupEditor(QDialog):
     def __init__(self, group_id: Optional[int] = None, name: str = "", 
@@ -858,7 +1097,7 @@ class MainWindow(QMainWindow):
         self.last_clipboard_path = None
         return None
 
-    def show_add_button_dialog_from_clipboard(self, path, icon_path=""):
+    def show_add_button_dialog_from_clipboard(self, path):
         """从剪贴板路径显示添加按钮对话框"""
         current_index = self.tab_widget.currentIndex()
         if current_index == -1:
@@ -875,9 +1114,13 @@ class MainWindow(QMainWindow):
         group_id = groups[current_index][0]
         name = os.path.splitext(os.path.basename(path))[0]
         
-        # 如果没有找到图标文件且是EXE文件，尝试自动提取图标
-        if not icon_path and path.lower().endswith('.exe'):
+        # 自动设置图标
+        icon_path = ""
+        if path.lower().endswith('.exe'):
             icon_path = DynamicIconGenerator.extract_exe_icon(path)
+        if not icon_path:
+            program_dir = os.path.dirname(path)
+            icon_path = DynamicIconGenerator.find_icon_in_directory(program_dir)
         
         dialog = ButtonEditor(
             group_id=group_id,
@@ -895,23 +1138,9 @@ class MainWindow(QMainWindow):
         """处理Ctrl+V快捷键"""
         path = self.check_clipboard_for_executable()
         if path:
-            # 检查程序目录下是否有icon.*文件
-            program_dir = os.path.dirname(path)
-            icon_files = glob.glob(os.path.join(program_dir, "icon.*"))
-            
-            # 支持常见的图标格式
-            supported_extensions = ('.ico', '.png', '.jpg', '.jpeg', '.bmp')
-            icon_path = ""
-            
-            for icon_file in icon_files:
-                if icon_file.lower().endswith(supported_extensions):
-                    icon_path = icon_file
-                    break
-            
-            self.show_add_button_dialog_from_clipboard(path, icon_path)
+            self.show_add_button_dialog_from_clipboard(path)
         else:
             QMessageBox.information(self, "提示", "剪贴板中没有找到可执行文件")
-
 
 
     def create_search_box(self):
@@ -1105,7 +1334,9 @@ class MainWindow(QMainWindow):
         else:
             # 添加所有按钮
             for button_id, name, path, args, working_dir, run_as_admin, icon_path, _, is_favorite in buttons:
-                btn = QPushButton(name)
+                btn = QToolButton()
+                btn.setText(name)
+                btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
                 btn.setToolTip(f"路径: {path}\n参数: {args}\n工作目录: {working_dir}")
                 
                 # 设置按钮固定大小
@@ -1421,7 +1652,59 @@ class MainWindow(QMainWindow):
             # 重新加载数据
             self.load_data()
 
+def fix_pyinstaller_permission_issue():
+    """解决PyInstaller权限问题"""
+    import sys
+    import os
+    if getattr(sys, 'frozen', False) and os.name == 'nt':
+        # 如果是打包后的程序在Windows上运行
+        import win32api
+        import win32con
+        import win32security
+        
+        # 获取当前可执行文件路径
+        exe_path = sys.executable
+        
+        try:
+            # 获取文件安全描述符
+            sd = win32security.GetFileSecurity(
+                exe_path, 
+                win32security.DACL_SECURITY_INFORMATION
+            )
+            
+            # 获取当前用户SID
+            user_sid = win32security.GetTokenInformation(
+                win32security.OpenProcessToken(
+                    win32api.GetCurrentProcess(),
+                    win32con.TOKEN_QUERY
+                ),
+                win32security.TokenUser
+            )[0]
+            
+            # 添加完全控制权限
+            dacl = sd.GetSecurityDescriptorDacl()
+            dacl.AddAccessAllowedAce(
+                win32security.ACL_REVISION,
+                win32con.FILE_ALL_ACCESS,
+                user_sid
+            )
+            
+            # 应用新的安全描述符
+            sd.SetSecurityDescriptorDacl(1, dacl, 0)
+            win32security.SetFileSecurity(
+                exe_path,
+                win32security.DACL_SECURITY_INFORMATION,
+                sd
+            )
+        except Exception as e:
+            print(f"无法修复权限问题: {e}")
+
+# 在程序启动时调用
+fix_pyinstaller_permission_issue()
+
+
 if __name__ == "__main__":
+    fix_pyinstaller_permission_issue()
     app = QApplication(sys.argv)
     
     # 设置应用程序信息 - 使用 ProjectInfo 中的元数据
