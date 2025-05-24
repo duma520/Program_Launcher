@@ -1,5 +1,6 @@
 import os
 import sys
+import time
 
 def disable_pyinstaller_timestamp():
     """禁用PyInstaller的时间戳设置"""
@@ -41,7 +42,7 @@ from typing import Optional, List, Tuple, Dict, Any
 
 class ProjectInfo:
     """项目信息元数据（集中管理所有项目相关信息）"""
-    VERSION = "1.14.0"
+    VERSION = "1.19.0"
     BUILD_DATE = "2025-05-24"
     AUTHOR = "杜玛"
     LICENSE = "MIT"
@@ -395,6 +396,27 @@ class DatabaseManager:
         self._init_db() # 初始化数据库
         self._init_backup_dir() # 初始化备份目录
         self._init_icon_dir() # 初始化图标目录
+        self.conn = None  # 添加连接对象引用
+        self.last_check_time = 0  # 添加最后检查时间
+
+    def check_connection(self):
+        """检查并确保数据库连接正常"""
+        current_time = time.time()
+        if current_time - self.last_check_time < 60:  # 每分钟最多检查一次
+            
+            return True
+            
+        try:
+            # 尝试执行一个简单的查询来测试连接
+            temp_conn = sqlite3.connect(self.db_path)
+            cursor = temp_conn.cursor()
+            cursor.execute("SELECT name FROM sqlite_master WHERE type='table'")
+            temp_conn.close()
+            self.last_check_time = current_time
+            return True
+        except sqlite3.Error as e:
+            print(f"数据库连接检查失败: {str(e)}")
+            return False
 
     def _init_backup_dir(self):
         """初始化备份目录"""
@@ -402,21 +424,35 @@ class DatabaseManager:
             os.makedirs("backups")
     
     def backup_database(self):
-        """备份数据库到backups目录"""
+        """备份数据库到backups目录（带频率限制检查）"""
         try:
+            # 检查上次备份时间，避免过于频繁备份（调整为4.5分钟）
+            current_time = time.time()
+            if hasattr(self, 'last_backup_time') and current_time - self.last_backup_time < 270:
+                # 如果距离上次备份不到4.5分钟（270秒），跳过本次备份
+                return False
+                
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             backup_path = os.path.join("backups", f"launcher_backup_{timestamp}.db")
             shutil.copy2(self.db_path, backup_path)
             
-            # 保留最多5个备份文件
+            # 更新最后备份时间
+            self.last_backup_time = current_time
+            
+            # 保留最多24个备份文件（因为现在是每5分钟备份，24个=2小时）
             backups = sorted(glob.glob(os.path.join("backups", "launcher_backup_*.db")))
-            if len(backups) > 5:
-                for old_backup in backups[:-5]:
-                    os.remove(old_backup)
+            if len(backups) > 24:
+                for old_backup in backups[:-24]:
+                    try:
+                        os.remove(old_backup)
+                    except Exception as e:
+                        print(f"删除旧备份失败: {str(e)}")
             return True
         except Exception as e:
             print(f"备份失败: {str(e)}")
-            return False    
+            return False
+
+
             
     def _init_db(self):
         """初始化数据库"""
@@ -484,11 +520,27 @@ class DatabaseManager:
             return cursor.lastrowid
     
     def get_groups(self) -> List[Tuple[int, str, int, int]]:
-        """获取所有分组"""
-        with sqlite3.connect(self.db_path) as conn:
-            cursor = conn.cursor()
-            cursor.execute("SELECT id, name, position, is_favorite FROM groups ORDER BY is_favorite DESC, position")
-            return cursor.fetchall()
+        """获取所有分组（带连接检查和重试）"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                if not self.check_connection():
+                    if attempt == max_retries - 1:
+                        return []  # 最后一次尝试失败返回空列表
+                    time.sleep(0.5)  # 短暂等待后重试
+                    continue
+                    
+                with sqlite3.connect(self.db_path) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT id, name, position, is_favorite FROM groups ORDER BY is_favorite DESC, position")
+                    return cursor.fetchall()
+                    
+            except sqlite3.Error as e:
+                print(f"获取分组失败(尝试 {attempt + 1}/{max_retries}): {str(e)}")
+                if attempt == max_retries - 1:
+                    return []  # 最后一次尝试失败返回空列表
+                time.sleep(0.5)  # 短暂等待后重试
+
     
     def update_group_name(self, group_id: int, new_name: str):
         """更新分组名称"""
@@ -806,17 +858,17 @@ class ButtonEditor(QDialog):
             self.icon_btn.setText("设置图标")
     
     def browse_path(self):
-        """浏览文件系统选择程序"""
-        # 先检查剪贴板是否有可执行文件
+        """浏览文件系统选择程序或目录"""
+        # 先检查剪贴板是否有文件或目录
         clipboard = QApplication.clipboard()
         if clipboard.mimeData().hasUrls():
             urls = clipboard.mimeData().urls()
             if urls and urls[0].isLocalFile():
                 path = urls[0].toLocalFile()
-                if path.lower().endswith(('.exe', '.lnk', '.bat', '.cmd')):
+                if os.path.exists(path):  # 检查路径是否存在
                     reply = QMessageBox.question(
                         self, "使用剪贴板路径", 
-                        f"检测到剪贴板中有可执行文件:\n{path}\n\n是否使用此路径?",
+                        f"检测到剪贴板中有路径:\n{path}\n\n是否使用此路径?",
                         QMessageBox.Yes | QMessageBox.No, QMessageBox.Yes)
                     if reply == QMessageBox.Yes:
                         self.path_edit.setText(path)
@@ -825,19 +877,46 @@ class ButtonEditor(QDialog):
                             self.set_icon_from_path(path)
                         return
         
-        # 如果没有剪贴板路径或用户选择不使用，则显示文件对话框
-        path, _ = QFileDialog.getOpenFileName(
-            self, "选择程序", "", "可执行文件 (*.exe *.bat *.cmd);;所有文件 (*.*)")
-        if path:
-            self.path_edit.setText(path)
-            # 如果没有选择图标，尝试获取图标
-            if not self.icon_path:
-                self.set_icon_from_path(path)
+        # 显示文件/目录选择对话框
+        dialog = QFileDialog(self)
+        dialog.setFileMode(QFileDialog.ExistingFile)
+        dialog.setOption(QFileDialog.DontUseNativeDialog, True)
+        
+        # 添加"选择文件夹"按钮
+        dir_btn = QPushButton("选择文件夹")
+        dir_btn.clicked.connect(lambda: dialog.setFileMode(QFileDialog.Directory))
+        dialog.layout().addWidget(dir_btn)
+        
+        # 添加"选择文件"按钮
+        file_btn = QPushButton("选择文件")
+        file_btn.clicked.connect(lambda: dialog.setFileMode(QFileDialog.ExistingFile))
+        dialog.layout().addWidget(file_btn)
+        
+        if dialog.exec_():
+            paths = dialog.selectedFiles()
+            if paths:
+                path = paths[0]
+                self.path_edit.setText(path)
+                # 如果没有选择图标，尝试获取图标
+                if not self.icon_path:
+                    self.set_icon_from_path(path)
+
 
     def set_icon_from_path(self, path):
         """根据路径自动设置图标"""
-        # 如果是EXE文件，先尝试提取内置图标
-        if path.lower().endswith('.exe'):
+        if os.path.isdir(path):  # 如果是目录
+            # 使用系统文件夹图标
+            from win32com.shell import shell, shellcon
+            try:
+                _, icon = shell.SHGetFileInfo(path, 0, shellcon.SHGFI_ICON | shellcon.SHGFI_LARGEICON)
+                icon_path = os.path.join(os.path.dirname(self.db_path), "folder_icon.ico")
+                icon.Save(icon_path)
+                self.icon_path = icon_path
+                self.update_icon_btn()
+                return
+            except:
+                pass
+        elif path.lower().endswith('.exe'):  # 如果是EXE文件
             icon_path = DynamicIconGenerator.extract_exe_icon(path)
             if icon_path:
                 self.icon_path = icon_path
@@ -845,11 +924,12 @@ class ButtonEditor(QDialog):
                 return
         
         # 在程序所在目录查找图标文件
-        program_dir = os.path.dirname(path)
+        program_dir = os.path.dirname(path) if os.path.isfile(path) else path
         icon_path = DynamicIconGenerator.find_icon_in_directory(program_dir)
         if icon_path:
             self.icon_path = icon_path
             self.update_icon_btn()
+
 
 
     
@@ -889,6 +969,17 @@ class ButtonEditor(QDialog):
             QMessageBox.warning(self, "警告", "程序路径不能为空!")
             return
         
+        # 预处理路径
+        path = path.replace('/', '\\').strip('"\'')
+        if working_dir:
+            working_dir = working_dir.replace('/', '\\').strip('"\'')
+        
+        # 验证路径
+        if not os.path.exists(path):
+            if not (path.startswith('\\\\') or ':/' in path or ':\\' in path):
+                QMessageBox.warning(self, "警告", "指定的路径不存在!")
+                return
+        
         db = DatabaseManager()
         
         # 处理图标路径
@@ -925,6 +1016,7 @@ class ButtonEditor(QDialog):
         
         self.parent.load_data()  # 刷新主界面
         self.close()
+
 
 
 
@@ -974,11 +1066,13 @@ class GroupEditor(QDialog):
         name = self.name_edit.text().strip()
         is_favorite = self.favorite_check.isChecked()
         
+        print(f"分组名称: {name}, 收藏: {is_favorite}")
         if not name:
             QMessageBox.warning(self, "警告", "分组名称不能为空!")
             return
         
         db = DatabaseManager()
+        print(f"分组ID: {self.group_id}")
         if self.group_id is not None:
             # 更新现有分组
             db.update_group_name(self.group_id, name)
@@ -1057,7 +1151,7 @@ class MainWindow(QMainWindow):
         # 添加定时备份
         self.backup_timer = QTimer(self)
         self.backup_timer.timeout.connect(self.perform_backup)
-        self.backup_timer.start(3600000)  # 每小时备份一次 (3600000毫秒)
+        self.backup_timer.start(300000)  # 每5分钟备份一次 (300000毫秒) 300000毫秒 = 5分钟
         
         # 初始化批量选择模式
         self.batch_mode = False
@@ -1081,25 +1175,27 @@ class MainWindow(QMainWindow):
         self.addAction(self.paste_action)
 
     def check_clipboard_for_executable(self):
-        """检查剪贴板中是否有可执行文件"""
+        """检查剪贴板中是否有可执行文件或目录"""
         if self.clipboard.mimeData().hasUrls():
             urls = self.clipboard.mimeData().urls()
             if urls and urls[0].isLocalFile():
                 path = urls[0].toLocalFile()
-                if path.lower().endswith(('.exe', '.lnk', '.bat', '.cmd')):
+                if os.path.exists(path):  # 检查路径是否存在
                     self.last_clipboard_path = path
                     return path
         elif self.clipboard.mimeData().hasText():
             text = self.clipboard.text().strip()
-            if text.lower().endswith(('.exe', '.lnk', '.bat', '.cmd')) and os.path.exists(text):
+            if os.path.exists(text):  # 检查路径是否存在
                 self.last_clipboard_path = text
                 return text
         self.last_clipboard_path = None
         return None
 
+
     def show_add_button_dialog_from_clipboard(self, path):
         """从剪贴板路径显示添加按钮对话框"""
         current_index = self.tab_widget.currentIndex()
+        print(f"当前选中的分组索引: {current_index}")
         if current_index == -1:
             QMessageBox.warning(self, "警告", "请先选择一个分组!")
             return
@@ -1107,13 +1203,15 @@ class MainWindow(QMainWindow):
         # 获取当前分组ID
         db = DatabaseManager()
         groups = db.get_groups()
+        print(f"当前分组列表: {groups}")
         if not groups:
             QMessageBox.warning(self, "错误", "没有可用的分组!")
             return
         
         group_id = groups[current_index][0]
         name = os.path.splitext(os.path.basename(path))[0]
-        
+        print(f"从剪贴板添加按钮: {name}, 路径: {path}")
+
         # 自动设置图标
         icon_path = ""
         if path.lower().endswith('.exe'):
@@ -1137,7 +1235,10 @@ class MainWindow(QMainWindow):
     def handle_paste_shortcut(self):
         """处理Ctrl+V快捷键"""
         path = self.check_clipboard_for_executable()
+        print(f"剪贴板路径: {path}")
+
         if path:
+            print(f"检测到剪贴板中的可执行文件: {path}")
             self.show_add_button_dialog_from_clipboard(path)
         else:
             QMessageBox.information(self, "提示", "剪贴板中没有找到可执行文件")
@@ -1201,12 +1302,17 @@ class MainWindow(QMainWindow):
             QMessageBox.information(self, "搜索结果", "没有找到匹配的项目")
     
     def perform_backup(self):
-        """执行数据库备份"""
+        """执行数据库备份（带日志记录）"""
         db = DatabaseManager()
         if db.backup_database():
-            print(f"数据库已自动备份于 {datetime.datetime.now()}")
+            print(f"数据库已自动备份（每5分钟）于 {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+            # 如果需要更详细的日志可以添加：
+            # 获取备份文件数量
+            backups = glob.glob(os.path.join("backups", "launcher_backup_*.db"))
+            print(f"当前保留备份数量: {len(backups)}/24")
         else:
-            print("数据库自动备份失败")
+            print("数据库自动备份跳过（频率限制）")
+
 
     def set_application_icon(self):
         """设置应用程序图标"""
@@ -1266,122 +1372,204 @@ class MainWindow(QMainWindow):
                         btn.setStyleSheet("")
     
     def load_data(self):
-        """加载分组和按钮数据"""
-        # 清除现有标签页
-        while self.tab_widget.count() > 0:
-            self.tab_widget.removeTab(0)
-        
-        db = DatabaseManager()
-        groups = db.get_groups()
-        
-        if not groups:
-            # 如果没有分组，添加一个默认分组
-            default_group_id = db.add_group("默认分组")
+        """加载分组和按钮数据（增强稳定性版本）"""
+        try:
+            print("[DEBUG] 开始加载数据...")
+            
+            # 清除现有标签页前先备份当前选中索引
+            current_index = self.tab_widget.currentIndex()
+            
+            # 清除现有标签页
+            while self.tab_widget.count() > 0:
+                widget = self.tab_widget.widget(0)
+                self.tab_widget.removeTab(0)
+                if widget:
+                    widget.deleteLater()
+            
+            db = DatabaseManager()
             groups = db.get_groups()
-        
-        for group_id, group_name, _, is_favorite in groups:
-            self.add_group_tab(group_id, group_name, is_favorite)
+            print(f"[DEBUG] 从数据库获取的分组: {groups}")
+            
+            if not groups:
+                print("[DEBUG] 没有分组，创建默认分组")
+                # 如果没有分组，添加一个默认分组
+                try:
+                    default_group_id = db.add_group("默认分组")
+                    # 再次尝试获取分组
+                    groups = db.get_groups()
+                    if not groups:
+                        raise Exception("无法创建默认分组")
+                except Exception as e:
+                    print(f"[ERROR] 创建默认分组失败: {str(e)}")
+                    # 创建内存中的临时分组
+                    groups = [(1, "默认分组", 0, 0)]
+            
+            # 按顺序添加分组标签页
+            for group_id, group_name, _, is_favorite in groups:
+                try:
+                    self.add_group_tab(group_id, group_name, is_favorite)
+                    print(f"[DEBUG] 成功添加分组标签页: {group_name}")
+                except Exception as e:
+                    print(f"[ERROR] 添加分组标签页失败: {group_name}, 错误: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+            
+            # 恢复之前选中的标签页
+            if current_index >= 0 and current_index < self.tab_widget.count():
+                self.tab_widget.setCurrentIndex(current_index)
+                
+            print("[DEBUG] 数据加载完成")
+            
+        except Exception as e:
+            print(f"[CRITICAL] 加载数据时发生严重错误: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            
+            # 尝试恢复基本功能
+            QMessageBox.warning(self, "错误", "加载数据时发生错误，正在尝试恢复...")
+            self.tab_widget.clear()
+            self.add_group_tab(1, "默认分组", False)
+
+
     
     def add_group_tab(self, group_id: int, group_name: str, is_favorite: bool):
-        """添加分组标签页"""
-        tab = QWidget()
-        tab_layout = QVBoxLayout(tab)
-        
-        # 创建滚动区域
-        scroll = QScrollArea()
-        scroll.setWidgetResizable(True)
-        scroll_content = QWidget()
-        scroll_layout = QVBoxLayout(scroll_content)
-        
-        # 添加分组标题和编辑按钮
-        header_layout = QHBoxLayout()
-        
-        # 收藏星标
-        favorite_icon = QLabel()
-        favorite_icon.setPixmap(QIcon(":star.png").pixmap(16, 16)) if is_favorite else favorite_icon.clear()
-        header_layout.addWidget(favorite_icon)
-        
-        group_label = QLabel(f"<h2>{group_name}</h2>")
-        header_layout.addWidget(group_label)
-        
-        # 编辑分组按钮
-        edit_group_btn = QPushButton("编辑")
-        edit_group_btn.clicked.connect(lambda _, gid=group_id, name=group_name, fav=is_favorite: 
-                                     self.show_edit_group_dialog(gid, name, fav))
-        header_layout.addWidget(edit_group_btn)
-        
-        # 删除分组按钮
-        delete_group_btn = QPushButton("删除")
-        delete_group_btn.clicked.connect(lambda _, gid=group_id: self.delete_group(gid))
-        header_layout.addWidget(delete_group_btn)
-        
-        header_layout.addItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
-        scroll_layout.addLayout(header_layout)
-        
-        # 添加按钮区域 - 修改为流式布局
-        buttons_group = QGroupBox()
-        buttons_layout = FlowLayout()  # 使用自定义的流式布局
-        buttons_group.setLayout(buttons_layout)
-        
-        db = DatabaseManager()
-        buttons = db.get_buttons(group_id)
-        
-        if not buttons:
-            # 如果没有按钮，显示提示信息
-            no_buttons_label = QLabel('此分组没有按钮，点击右上角的"添加按钮"来添加。')
-            no_buttons_label.setAlignment(Qt.AlignCenter)
-            buttons_layout.addWidget(no_buttons_label)
-        else:
-            # 添加所有按钮
-            for button_id, name, path, args, working_dir, run_as_admin, icon_path, _, is_favorite in buttons:
-                btn = QToolButton()
-                btn.setText(name)
-                btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
-                btn.setToolTip(f"路径: {path}\n参数: {args}\n工作目录: {working_dir}")
+        """添加分组标签页（增强稳定性版本）"""
+        try:
+            print(f"[DEBUG] 开始添加分组标签页: {group_name}")
+            
+            tab = QWidget()
+            tab_layout = QVBoxLayout(tab)
+            
+            # 创建滚动区域
+            scroll = QScrollArea()
+            scroll.setWidgetResizable(True)
+            scroll_content = QWidget()
+            scroll_layout = QVBoxLayout(scroll_content)
+            
+            # 添加分组标题和编辑按钮
+            try:
+                header_layout = QHBoxLayout()
                 
-                # 设置按钮固定大小
-                btn.setFixedSize(120, 60)
-                
-                # 设置按钮图标
-                if icon_path and os.path.exists(icon_path):
-                    btn.setIcon(QIcon(icon_path))
-                    btn.setIconSize(QSize(32, 32))
-                
-                # 如果是收藏的按钮，添加星标
+                # 收藏星标
+                favorite_icon = QLabel()
                 if is_favorite:
-                    btn.setStyleSheet("font-weight: bold; color: #FF6600;")
+                    try:
+                        favorite_icon.setPixmap(QIcon(":star.png").pixmap(16, 16))
+                    except:
+                        favorite_icon.setText("★")
+                header_layout.addWidget(favorite_icon)
                 
-                # 如果是管理员权限运行，添加特殊样式
-                if run_as_admin:
-                    btn.setStyleSheet(btn.styleSheet() + "border: 1px solid red;")
+                group_label = QLabel(f"<h2>{group_name}</h2>")
+                header_layout.addWidget(group_label)
                 
-                # 按钮点击事件
-                if not self.batch_mode:
-                    btn.clicked.connect(lambda _, p=path, a=args, wd=working_dir, ra=run_as_admin: 
-                                       self.launch_program(p, a, wd, ra))
+                # 编辑分组按钮
+                edit_group_btn = QPushButton("编辑")
+                edit_group_btn.clicked.connect(lambda _, gid=group_id, name=group_name, fav=is_favorite: 
+                                            self.show_edit_group_dialog(gid, name, fav))
+                header_layout.addWidget(edit_group_btn)
+                
+                # 删除分组按钮
+                delete_group_btn = QPushButton("删除")
+                delete_group_btn.clicked.connect(lambda _, gid=group_id: self.delete_group(gid))
+                header_layout.addWidget(delete_group_btn)
+                
+                header_layout.addItem(QSpacerItem(40, 20, QSizePolicy.Expanding, QSizePolicy.Minimum))
+                scroll_layout.addLayout(header_layout)
+            except Exception as e:
+                print(f"[ERROR] 创建分组标题失败: {str(e)}")
+                scroll_layout.addWidget(QLabel(f"<h2>{group_name}</h2>"))
+            
+            # 添加按钮区域
+            try:
+                buttons_group = QGroupBox()
+                buttons_layout = FlowLayout()
+                buttons_group.setLayout(buttons_layout)
+                
+                db = DatabaseManager()
+                buttons = db.get_buttons(group_id)
+                print(f"[DEBUG] 分组 {group_name} 的按钮数量: {len(buttons)}")
+                
+                if not buttons:
+                    # 如果没有按钮，显示提示信息
+                    no_buttons_label = QLabel('此分组没有按钮，点击右上角的"添加按钮"来添加。')
+                    no_buttons_label.setAlignment(Qt.AlignCenter)
+                    buttons_layout.addWidget(no_buttons_label)
                 else:
-                    btn.clicked.connect(lambda _, bid=button_id, b=btn: 
-                                       self.toggle_button_selection(bid, b))
+                    # 添加所有按钮
+                    for button_data in buttons:
+                        try:
+                            (button_id, name, path, args, working_dir, 
+                            run_as_admin, icon_path, _, is_favorite) = button_data
+                            
+                            btn = QToolButton()
+                            btn.setText(name)
+                            btn.setToolButtonStyle(Qt.ToolButtonTextUnderIcon)
+                            btn.setToolTip(f"路径: {path}\n参数: {args}\n工作目录: {working_dir}")
+                            
+                            # 设置按钮固定大小
+                            btn.setFixedSize(120, 60)
+                            
+                            # 设置按钮图标
+                            if icon_path and os.path.exists(icon_path):
+                                try:
+                                    btn.setIcon(QIcon(icon_path))
+                                    btn.setIconSize(QSize(32, 32))
+                                except:
+                                    print(f"[WARNING] 无法加载图标: {icon_path}")
+                            
+                            # 如果是收藏的按钮，添加星标
+                            if is_favorite:
+                                btn.setStyleSheet("font-weight: bold; color: #FF6600;")
+                            
+                            # 如果是管理员权限运行，添加特殊样式
+                            if run_as_admin:
+                                btn.setStyleSheet(btn.styleSheet() + "border: 1px solid red;")
+                            
+                            # 按钮点击事件
+                            if not self.batch_mode:
+                                btn.clicked.connect(lambda _, p=path, a=args, wd=working_dir, ra=run_as_admin: 
+                                                self.launch_program(p, a, wd, ra))
+                            else:
+                                btn.clicked.connect(lambda _, bid=button_id, b=btn: 
+                                                self.toggle_button_selection(bid, b))
+                            
+                            # 按钮上下文菜单
+                            btn.setContextMenuPolicy(Qt.CustomContextMenu)
+                            btn.customContextMenuRequested.connect(
+                                lambda pos, bid=button_id, gid=group_id, n=name, p=path, 
+                                    a=args, wd=working_dir, ra=run_as_admin, ip=icon_path, fav=is_favorite: 
+                                self.show_button_context_menu(pos, bid, gid, n, p, a, wd, ra, ip, fav))
+                            
+                            buttons_layout.addWidget(btn)
+                        except Exception as e:
+                            print(f"[ERROR] 创建按钮失败: {name}, 错误: {str(e)}")
+                            continue
+                    
+                scroll_layout.addWidget(buttons_group)
+                scroll_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
                 
-                # 按钮上下文菜单
-                btn.setContextMenuPolicy(Qt.CustomContextMenu)
-                btn.customContextMenuRequested.connect(
-                    lambda pos, bid=button_id, gid=group_id, n=name, p=path, 
-                           a=args, wd=working_dir, ra=run_as_admin, ip=icon_path, fav=is_favorite: 
-                    self.show_button_context_menu(pos, bid, gid, n, p, a, wd, ra, ip, fav))
+                scroll.setWidget(scroll_content)
+                tab_layout.addWidget(scroll)
                 
-                buttons_layout.addWidget(btn)
-        
-        scroll_layout.addWidget(buttons_group)
-        scroll_layout.addItem(QSpacerItem(20, 40, QSizePolicy.Minimum, QSizePolicy.Expanding))
-        
-        scroll.setWidget(scroll_content)
-        tab_layout.addWidget(scroll)
-        
-        # 添加标签页
-        self.tab_widget.addTab(tab, group_name)
-        if is_favorite:
-            self.tab_widget.tabBar().setTabTextColor(self.tab_widget.count()-1, QColor(255, 102, 0))
+                # 添加标签页
+                self.tab_widget.addTab(tab, group_name)
+                if is_favorite:
+                    self.tab_widget.tabBar().setTabTextColor(self.tab_widget.count()-1, QColor(255, 102, 0))
+                    
+                print(f"[DEBUG] 成功添加分组标签页: {group_name}")
+                
+            except Exception as e:
+                print(f"[ERROR] 创建按钮区域失败: {str(e)}")
+                error_label = QLabel(f"无法加载按钮: {str(e)}")
+                error_label.setAlignment(Qt.AlignCenter)
+                tab_layout.addWidget(error_label)
+                self.tab_widget.addTab(tab, group_name)
+                
+        except Exception as e:
+            print(f"[CRITICAL] 添加分组标签页时发生严重错误: {str(e)}")
+            import traceback
+            traceback.print_exc()
+
     
     def toggle_button_selection(self, button_id: int, button: QPushButton):
         """切换按钮的选择状态"""
@@ -1433,7 +1621,11 @@ class MainWindow(QMainWindow):
         group_id = groups[current_index][0]
         dialog = ButtonEditor(group_id=group_id, parent=self)
         dialog.setWindowFlags(dialog.windowFlags() | Qt.WindowStaysOnTopHint)
-        dialog.exec_()
+        if dialog.exec_() == QDialog.Accepted:
+            # 添加短暂延迟确保数据库写入完成
+            QTimer.singleShot(100, self.load_data)
+
+        
     
     def show_edit_button_dialog(self, button_id: int, name: str, path: str, 
                               arguments: str, working_dir: str, 
@@ -1564,8 +1756,33 @@ class MainWindow(QMainWindow):
             self.load_data()
     
     def launch_program(self, path: str, arguments: str = "", working_dir: str = "", run_as_admin: bool = False):
-        """启动指定程序"""
+        """启动指定程序或打开目录"""
         try:
+            # 预处理路径 - 替换正斜杠为反斜杠，并去除多余的引号
+            path = path.replace('/', '\\').strip('"\'')
+            
+            # 预处理工作目录
+            if working_dir:
+                working_dir = working_dir.replace('/', '\\').strip('"\'')
+            
+            # 检查路径是否存在
+            if not os.path.exists(path):
+                # 尝试重新映射网络驱动器
+                if path.startswith('\\\\'):
+                    # 网络路径，尝试直接访问
+                    pass
+                elif ':/' in path or ':\\' in path:
+                    # 映射驱动器路径，尝试重新连接
+                    QMessageBox.warning(self, "警告", f"路径 {path} 不可访问，请检查网络连接或驱动器映射")
+                    return
+                else:
+                    QMessageBox.warning(self, "警告", f"路径 {path} 不存在")
+                    return
+
+            if os.path.isdir(path):  # 如果是目录
+                os.startfile(path)  # 使用系统默认方式打开目录
+                return
+
             if sys.platform == "win32":
                 if run_as_admin:
                     # 以管理员权限运行
@@ -1573,23 +1790,38 @@ class MainWindow(QMainWindow):
                     from win32com.shell.shell import ShellExecuteEx
                     from win32com.shell import shellcon
                     
-                    params = f'"{path}" {arguments}' if arguments else f'"{path}"'
+                    params = arguments if arguments else ""
                     working_dir = working_dir if working_dir else os.path.dirname(path)
+                    
+                    # 确保工作目录存在
+                    if working_dir and not os.path.exists(working_dir):
+                        working_dir = None
                     
                     ShellExecuteEx(
                         nShow=win32con.SW_SHOWNORMAL,
                         fMask=shellcon.SEE_MASK_NOCLOSEPROCESS,
                         lpVerb='runas',
                         lpFile=path,
-                        lpParameters=arguments,
+                        lpParameters=params,
                         lpDirectory=working_dir
                     )
                 else:
                     # 普通方式运行
-                    params = f'"{path}" {arguments}' if arguments else f'"{path}"'
+                    params = arguments if arguments else ""
                     working_dir = working_dir if working_dir else os.path.dirname(path)
-                    os.chdir(working_dir)
-                    os.startfile(params)
+                    
+                    # 确保工作目录存在
+                    if working_dir and not os.path.exists(working_dir):
+                        working_dir = None
+                    
+                    # 使用subprocess更可靠地启动程序
+                    import subprocess
+                    try:
+                        subprocess.Popen([path] + params.split(), cwd=working_dir)
+                    except Exception as e:
+                        # 回退到os.startfile
+                        os.startfile(path)
+                        
             else:
                 # 非Windows系统
                 cmd = f'xdg-open "{path}"'
@@ -1597,7 +1829,10 @@ class MainWindow(QMainWindow):
                     cmd += f' {arguments}'
                 os.system(cmd)
         except Exception as e:
+            print(f"无法启动程序: {e}")
             QMessageBox.critical(self, "错误", f"无法启动程序:\n{str(e)}")
+
+
     
     def closeEvent(self, event):
         """窗口关闭事件"""
