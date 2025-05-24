@@ -1,5 +1,7 @@
 # 软件截图：
 
+![image](https://github.com/user-attachments/assets/42dd110a-c7cb-41ca-a554-89d90ed2998f)
+
 ![image](https://github.com/user-attachments/assets/d40a9a4a-a848-401b-8fa3-f265d213c0c0)
 
 ![image](https://github.com/user-attachments/assets/8b4ef34e-d0e9-4f9b-bde9-6c5dd8ecf901)
