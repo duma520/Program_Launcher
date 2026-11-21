@@ -1,0 +1,38 @@
+# 核心GUI框架
+PyQt5>=5.15.0
+PyQt5-Qt5>=5.15.0
+PyQt5-sip>=12.9.0
+
+# Windows API 支持
+pywin32>=300
+
+# 图像处理（用于图标生成和提取）
+Pillow>=8.0.0
+
+# 拼音支持（用于搜索功能）
+pypinyin>=0.46.0
+
+# 数据库（Python内置，但明确版本要求）
+# sqlite3 是Python标准库，不需要单独安装
+
+# 编译和打包工具（开发依赖）
+Cython>=0.29.24
+pyinstaller>=5.0.0
+
+# 科学计算支持（Cython编译可能需要）
+numpy>=1.19.0
+
+# 系统工具
+psutil>=5.8.0  # 用于进程管理（可选，增强功能）
+
+# 文件监控（可选，用于自动刷新）
+watchdog>=2.1.0
+
+# 网络支持（可选，用于未来功能扩展）
+requests>=2.26.0
+
+# 加密支持（可选，用于配置加密）
+cryptography>=3.4.0
+
+# 额外的Windows特定支持
+pywin32-ctypes>=0.2.0
