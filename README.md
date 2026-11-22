@@ -281,7 +281,7 @@ pyinstaller --onefile --windowed --icon=icon.ico Program_Launcher.py
 © 2025 杜玛 保留所有权利
 
 ### 11.2 许可条款
-MIT License - 允许自由使用、修改和分发，但需保留原始版权声明
+AGPL-3.0 - 允许自由使用、修改和分发，但需保留原始版权声明
 
 ### 11.3 免责条款
 本软件按"原样"提供，作者不对使用后果承担任何责任
